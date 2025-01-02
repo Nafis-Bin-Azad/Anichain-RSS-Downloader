@@ -1,0 +1,1 @@
+{"download_folder": "/Users/nafislord/Downloads/Anime", "rss_url": "https://subsplease.org/rss/?r=1080", "qb_host": "http://127.0.0.1:8080", "qb_username": "nafislord", "qb_password": "Saphire 1"}
