@@ -918,6 +918,7 @@ class DownloadCard(FlippableCard):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        print("Initializing ANICHAIN...")
         self.manager = AnimeManager()
         self.setWindowTitle("ANICHAIN")
         self.setMinimumSize(800, 600)
@@ -933,6 +934,7 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(0)
         
         # Setup UI components first
+        print("Setting up UI components...")
         self.setup_ui()
         
         # Add status bar for qBittorrent at the bottom
@@ -941,24 +943,74 @@ class MainWindow(QMainWindow):
         # Setup timers
         self.setup_timers()
         
-        # Load initial data asynchronously
-        QTimer.singleShot(0, self.load_initial_data)
+        # Initialize resize timer
+        self.resize_timer = QTimer()
+        self.resize_timer.setSingleShot(True)
+        self.resize_timer.timeout.connect(self.handle_resize_timeout)
         
-    def load_initial_data(self):
-        """Load initial data asynchronously"""
-        # Try to connect to qBittorrent first
+        # Load initial data asynchronously with longer delays
+        print("Starting asynchronous data loading...")
+        QTimer.singleShot(0, self.connect_qbittorrent)
+        QTimer.singleShot(500, self.load_feed)
+        QTimer.singleShot(1000, self.load_schedule)
+        QTimer.singleShot(1500, self.update_tracked_list)
+        QTimer.singleShot(2000, self.update_downloads_list)
+        
+    def connect_qbittorrent(self):
+        """Try to connect to qBittorrent first"""
+        print("Connecting to qBittorrent...")
         if not self.manager.setup_qbittorrent():
-            # If connection fails, show the dialog
+            print("qBittorrent connection failed, showing dialog...")
             QTimer.singleShot(0, self.show_qbittorrent_dialog)
         else:
+            print("qBittorrent connected successfully")
             self.update_qbittorrent_status()
             
-        # Load other data
-        QTimer.singleShot(100, self.load_feed)
-        QTimer.singleShot(200, self.load_schedule)
-        QTimer.singleShot(300, self.update_tracked_list)
-        QTimer.singleShot(400, self.update_downloads_list)
-        
+    def load_feed(self):
+        """Load RSS feed asynchronously"""
+        print("Loading RSS feed...")
+        try:
+            self.manager.load_feed()
+            print("RSS feed loaded successfully")
+            self.display_anime_tiles()
+        except Exception as e:
+            print(f"Error loading RSS feed: {str(e)}")
+            
+    def load_schedule(self):
+        """Load schedule asynchronously"""
+        print("Loading schedule...")
+        try:
+            self.manager.load_schedule()
+            print("Schedule loaded successfully")
+            self.display_schedule()
+        except Exception as e:
+            print(f"Error loading schedule: {str(e)}")
+            
+    def update_tracked_list(self):
+        """Update tracked anime list asynchronously"""
+        print("Updating tracked anime list...")
+        try:
+            self.display_tracked_anime()
+            print("Tracked anime list updated")
+        except Exception as e:
+            print(f"Error updating tracked list: {str(e)}")
+            
+    def update_downloads_list(self):
+        """Update downloads list asynchronously"""
+        print("Updating downloads list...")
+        try:
+            self.display_downloads()
+            print("Downloads list updated")
+        except Exception as e:
+            print(f"Error updating downloads list: {str(e)}")
+            
+    def handle_resize_timeout(self):
+        """Handle resize event after timer timeout"""
+        try:
+            self.display_anime_tiles()
+        except Exception as e:
+            print(f"Error handling resize: {str(e)}")
+
     def check_series_status(self, series_name):
         """Check series status with caching"""
         if series_name in self.series_status_cache:
@@ -992,7 +1044,146 @@ class MainWindow(QMainWindow):
         except Exception:
             return "Ongoing"  # Default to ongoing if check fails
             
-    def load_schedule(self):
+    def display_anime_tiles(self):
+        """Display anime tiles in the grid layout"""
+        # Clear existing items
+        for i in reversed(range(self.grid_layout.count())): 
+            self.grid_layout.itemAt(i).widget().setParent(None)
+            
+        # Determine number of columns based on window width
+        window_width = self.width()
+        if window_width >= 1600:
+            columns = 7  # Large window
+        elif window_width >= 1200:
+            columns = 5  # Medium window
+        else:
+            columns = 3  # Small window
+            
+        # Add new items
+        for i, entry in enumerate(self.manager.fetch_rss_feed().entries):
+            card = AnimeCard(entry.get("title", "No Title"), self.manager)
+            card.clicked.connect(self.on_anime_clicked)
+            card.setFixedSize(220, 380)  # Fixed size for entire card
+            self.grid_layout.addWidget(card, i // columns, i % columns)
+            
+    def resizeEvent(self, event):
+        """Handle window resize events"""
+        super().resizeEvent(event)
+        # Reset and restart the timer
+        self.resize_timer.stop()
+        self.resize_timer.start(150)  # Wait for 150ms of no resize events
+        
+    def update_clock(self):
+        """Update the clock display"""
+        current_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        self.current_time_label.setText(f"Current Time: {current_time}")
+        
+    def setup_timers(self):
+        """Setup all application timers"""
+        # Add qBittorrent connection check every minute
+        self.qb_timer = QTimer()
+        self.qb_timer.timeout.connect(self.update_qbittorrent_status)
+        self.qb_timer.start(60000)  # Check every minute
+        
+        # Resize timer for debouncing
+        self.resize_timer = QTimer()
+        self.resize_timer.setSingleShot(True)
+        self.resize_timer.timeout.connect(self.handle_resize_timeout)
+        
+        # Clock timer
+        self.clock_timer = QTimer()
+        self.clock_timer.timeout.connect(self.update_clock)
+        self.clock_timer.start(1000)
+        
+        # Schedule timer
+        self.schedule_timer = QTimer()
+        self.schedule_timer.timeout.connect(self.load_schedule)
+        self.schedule_timer.start(300000)  # Every 5 minutes
+        
+        # Update downloads more frequently to show progress
+        self.downloads_timer = QTimer()
+        self.downloads_timer.timeout.connect(self.update_downloads_list)
+        self.downloads_timer.start(5000)  # Every 5 seconds
+        
+        # Feed refresh timer
+        self.feed_timer = QTimer()
+        self.feed_timer.timeout.connect(self.load_feed)
+        self.feed_timer.start(300000)  # Every 5 minutes
+        
+    def show_qbittorrent_dialog(self):
+        """Show the qBittorrent connection dialog"""
+        dialog = QBittorrentDialog(self.manager, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.update_qbittorrent_status()
+            
+    def update_qbittorrent_status(self):
+        """Update the qBittorrent connection status display"""
+        try:
+            if self.manager.qb_client and self.manager.setup_qbittorrent():
+                self.status_circle.setStyleSheet("color: #00b894; font-size: 14px; font-weight: bold;")
+                self.status_text.setText("qBittorrent Connected")
+                self.status_text.setStyleSheet("color: #00b894; font-weight: bold;")
+                self.reconnect_btn.hide()
+            else:
+                self.status_circle.setStyleSheet("color: #ff3b30; font-size: 14px; font-weight: bold;")
+                self.status_text.setText("qBittorrent Disconnected")
+                self.status_text.setStyleSheet("color: #ff3b30; font-weight: bold;")
+                self.reconnect_btn.show()
+        except Exception as e:
+            print(f"Error updating qBittorrent status: {str(e)}")
+            self.status_circle.setStyleSheet("color: #ff3b30; font-size: 14px; font-weight: bold;")
+            self.status_text.setText("qBittorrent Error")
+            self.status_text.setStyleSheet("color: #ff3b30; font-weight: bold;")
+            self.reconnect_btn.show()
+            
+    def ensure_qbittorrent_connection(self):
+        """Ensure there is a working qBittorrent connection"""
+        if not self.manager.qb_client or not self.manager.setup_qbittorrent():
+            dialog = QBittorrentDialog(self.manager, self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                self.update_qbittorrent_status()
+                return True
+            return False
+        return True
+
+    def display_tracked_anime(self):
+        """Display tracked anime in the grid layout"""
+        # Clear existing items
+        for i in reversed(range(self.tracked_layout.count())):
+            self.tracked_layout.itemAt(i).widget().setParent(None)
+        
+        # Get unique series names from both tracked and downloaded
+        series_set = set()
+        
+        # Add from tracked anime
+        for anime in self.manager.tracked_anime:
+            series_name = anime.replace("[SubsPlease]", "").strip().split(" - ")[0]
+            series_set.add(series_name)
+            
+        # Add from downloaded files
+        downloaded_files = self.manager.get_downloaded_files()
+        for file in downloaded_files:
+            if file.endswith(".mkv"):
+                series_name = file.replace("[SubsPlease]", "").strip().split(" - ")[0]
+                series_set.add(series_name)
+        
+        # Determine number of columns based on window width
+        window_width = self.width()
+        if window_width >= 1600:
+            columns = 7  # Large window
+        elif window_width >= 1200:
+            columns = 5  # Medium window
+        else:
+            columns = 3  # Small window
+        
+        # Create cards for each series
+        for i, series in enumerate(sorted(series_set)):
+            card = TrackedAnimeCard(series, self.manager)
+            card.setFixedSize(220, 380)  # Fixed size for entire card
+            self.tracked_layout.addWidget(card, i // columns, i % columns)
+            
+    def display_schedule(self):
+        """Display schedule in the schedule text area"""
         schedule_data = self.manager.fetch_schedule()
         if not schedule_data:
             self.schedule_text.setText("Failed to load schedule. Will retry in 5 minutes.")
@@ -1086,41 +1277,25 @@ class MainWindow(QMainWindow):
             )
         
     def update_tracked_list(self):
-        # Clear existing items
-        for i in reversed(range(self.tracked_layout.count())):
-            self.tracked_layout.itemAt(i).widget().setParent(None)
-        
-        # Get unique series names from both tracked and downloaded
-        series_set = set()
-        
-        # Add from tracked anime
-        for anime in self.manager.tracked_anime:
-            series_name = anime.replace("[SubsPlease]", "").strip().split(" - ")[0]
-            series_set.add(series_name)
-            
-        # Add from downloaded files
-        downloaded_files = self.manager.get_downloaded_files()
-        for file in downloaded_files:
-            if file.endswith(".mkv"):
-                series_name = file.replace("[SubsPlease]", "").strip().split(" - ")[0]
-                series_set.add(series_name)
-        
-        # Determine number of columns based on window width
-        window_width = self.width()
-        if window_width >= 1600:
-            columns = 7  # Large window
-        elif window_width >= 1200:
-            columns = 5  # Medium window
-        else:
-            columns = 3  # Small window
-        
-        # Create cards for each series
-        for i, series in enumerate(sorted(series_set)):
-            card = TrackedAnimeCard(series, self.manager)
-            card.setFixedSize(220, 380)  # Fixed size for entire card
-            self.tracked_layout.addWidget(card, i // columns, i % columns)
+        """Update tracked anime list asynchronously"""
+        print("Updating tracked anime list...")
+        try:
+            self.display_tracked_anime()
+            print("Tracked anime list updated")
+        except Exception as e:
+            print(f"Error updating tracked list: {str(e)}")
             
     def update_downloads_list(self):
+        """Update downloads list asynchronously"""
+        print("Updating downloads list...")
+        try:
+            self.display_downloads()
+            print("Downloads list updated")
+        except Exception as e:
+            print(f"Error updating downloads list: {str(e)}")
+            
+    def display_downloads(self):
+        """Display downloads in the downloads layout"""
         # Clear existing items
         for i in reversed(range(self.downloads_layout.count())):
             self.downloads_layout.itemAt(i).widget().setParent(None)
@@ -1685,91 +1860,6 @@ class MainWindow(QMainWindow):
             return False
         return True
 
-    def load_feed(self):
-        """Load and display the RSS feed"""
-        feed = self.manager.fetch_rss_feed()
-        if feed:
-            self.display_anime_tiles(feed.entries)
-            
-    def display_anime_tiles(self, entries):
-        """Display anime tiles in the grid layout"""
-        # Clear existing items
-        for i in reversed(range(self.grid_layout.count())): 
-            self.grid_layout.itemAt(i).widget().setParent(None)
-            
-        # Determine number of columns based on window width
-        window_width = self.width()
-        if window_width >= 1600:
-            columns = 7  # Large window
-        elif window_width >= 1200:
-            columns = 5  # Medium window
-        else:
-            columns = 3  # Small window
-            
-        # Add new items
-        for i, entry in enumerate(entries):
-            card = AnimeCard(entry.get("title", "No Title"), self.manager)
-            card.clicked.connect(self.on_anime_clicked)
-            card.setFixedSize(220, 380)  # Fixed size for entire card
-            self.grid_layout.addWidget(card, i // columns, i % columns)
-            
-    def resizeEvent(self, event):
-        """Handle window resize events"""
-        super().resizeEvent(event)
-        # Reset and restart the timer
-        self.resize_timer.stop()
-        self.resize_timer.start(150)  # Wait for 150ms of no resize events
-        
-    def update_clock(self):
-        """Update the clock display"""
-        current_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-        self.current_time_label.setText(f"Current Time: {current_time}")
-        
-    def setup_timers(self):
-        """Setup all application timers"""
-        # Add qBittorrent connection check every minute
-        self.qb_timer = QTimer()
-        self.qb_timer.timeout.connect(self.update_qbittorrent_status)
-        self.qb_timer.start(60000)  # Check every minute
-        
-        # Resize timer for debouncing
-        self.resize_timer = QTimer()
-        self.resize_timer.setSingleShot(True)
-        self.resize_timer.timeout.connect(self.handle_resize_timeout)
-        
-        # Clock timer
-        self.clock_timer = QTimer()
-        self.clock_timer.timeout.connect(self.update_clock)
-        self.clock_timer.start(1000)
-        
-        # Schedule timer
-        self.schedule_timer = QTimer()
-        self.schedule_timer.timeout.connect(self.load_schedule)
-        self.schedule_timer.start(300000)  # Every 5 minutes
-        
-        # Update downloads more frequently to show progress
-        self.downloads_timer = QTimer()
-        self.downloads_timer.timeout.connect(self.update_downloads_list)
-        self.downloads_timer.start(5000)  # Every 5 seconds
-        
-        # Feed refresh timer
-        self.feed_timer = QTimer()
-        self.feed_timer.timeout.connect(self.load_feed)
-        self.feed_timer.start(300000)  # Every 5 minutes
-        
-    def handle_resize_timeout(self):
-        """Handle resize timeout by refreshing the current page"""
-        # Only refresh the current visible page
-        current_index = self.content_stack.currentIndex()
-        if current_index == 0:  # Available page
-            feed = self.manager.fetch_rss_feed()
-            if feed:
-                self.display_anime_tiles(feed.entries)
-        elif current_index == 2:  # Tracked page
-            self.update_tracked_list()
-        elif current_index == 3:  # Downloads page
-            self.update_downloads_list()
-            
     def delete_episode(self, filename):
         """Delete an episode and remove it from qBittorrent"""
         try:
