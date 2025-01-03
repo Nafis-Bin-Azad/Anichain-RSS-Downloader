@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QPropertyAnimation, QPoint, QEasingCurve
 from PyQt6.QtGui import QPixmap, QImage, QPalette, QColor, QFont
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from anime_backend import AnimeManager
 
 class ImageLoader(QThread):
@@ -285,17 +285,9 @@ class QBittorrentDialog(QDialog):
         super().__init__(parent)
         self.manager = manager
         self.setWindowTitle("qBittorrent Connection")
-        self.setModal(True)
-        self.setup_ui()
+        self.setFixedWidth(400)
         
-    def setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setSpacing(15)
-        
-        # Add message
-        message = QLabel("Please configure qBittorrent connection to continue:")
-        message.setStyleSheet("font-weight: bold; color: #007AFF;")
-        layout.addWidget(message)
         
         # Host
         layout.addWidget(QLabel("Host:"))
@@ -313,10 +305,12 @@ class QBittorrentDialog(QDialog):
         self.password_entry.setEchoMode(QLineEdit.EchoMode.Password)
         layout.addWidget(self.password_entry)
         
-        # Connect button
-        connect_button = QPushButton("Connect")
-        connect_button.clicked.connect(self.try_connect)
-        connect_button.setStyleSheet("""
+        # Buttons
+        button_layout = QHBoxLayout()
+        
+        connect_btn = QPushButton("Connect")
+        connect_btn.clicked.connect(self.try_connect)
+        connect_btn.setStyleSheet("""
             QPushButton {
                 background-color: #007AFF;
                 color: white;
@@ -327,36 +321,39 @@ class QBittorrentDialog(QDialog):
                 background-color: #0066CC;
             }
         """)
-        layout.addWidget(connect_button)
         
-        # Status label
-        self.status_label = QLabel("")
-        self.status_label.setStyleSheet("color: red;")
-        layout.addWidget(self.status_label)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #ff3b30;
+                color: white;
+                border-radius: 5px;
+                padding: 8px 16px;
+            }
+            QPushButton:hover {
+                background-color: #ff453a;
+            }
+        """)
+        
+        button_layout.addWidget(connect_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
         
     def try_connect(self):
-        self.status_label.setText("Connecting...")
-        self.status_label.setStyleSheet("color: blue;")
-        QApplication.processEvents()
-        
-        # Update settings
         new_settings = self.manager.settings.copy()
         new_settings.update({
             "qb_host": self.host_entry.text(),
             "qb_username": self.username_entry.text(),
             "qb_password": self.password_entry.text()
         })
-        self.manager.save_settings(new_settings)
         
-        # Try connection
+        self.manager.save_settings(new_settings)
         if self.manager.setup_qbittorrent():
-            self.status_label.setText("Connected successfully!")
-            self.status_label.setStyleSheet("color: green;")
-            QTimer.singleShot(1000, self.accept)
+            self.accept()
         else:
-            self.status_label.setText("Connection failed. Please check your settings.")
-            self.status_label.setStyleSheet("color: red;")
-
+            QMessageBox.critical(self, "Error", "Failed to connect to qBittorrent")
+            
 class TrackedAnimeCard(FlippableCard):
     def __init__(self, series_name, manager, parent=None):
         super().__init__()
@@ -478,6 +475,20 @@ class TrackedAnimeCard(FlippableCard):
         episode_label.setStyleSheet("color: #666666;")
         info_layout.addWidget(episode_label)
         
+        # Next episode countdown
+        self.countdown_label = QLabel()
+        self.countdown_label.setStyleSheet("""
+            QLabel {
+                color: #00b894;
+                font-weight: bold;
+                padding: 5px;
+                background-color: #e6fff7;
+                border-radius: 5px;
+            }
+        """)
+        info_layout.addWidget(self.countdown_label)
+        self.update_countdown()
+        
         # Status
         status = self.check_series_status()
         status_label = QLabel(f"Status: {status}")
@@ -504,6 +515,11 @@ class TrackedAnimeCard(FlippableCard):
         """)
         untrack_btn.clicked.connect(self.untrack_series)
         layout.addWidget(untrack_btn)
+        
+        # Start countdown timer
+        self.countdown_timer = QTimer()
+        self.countdown_timer.timeout.connect(self.update_countdown)
+        self.countdown_timer.start(60000)  # Update every minute
         
     def set_image(self, title, pixmap):
         if title == self.series_name:
@@ -560,8 +576,14 @@ class TrackedAnimeCard(FlippableCard):
             if self.series_name not in anime
         ]
         self.manager.save_tracked_anime(self.manager.tracked_anime)
-        main_window.update_tracked_list()
-        main_window.refresh_card_statuses()
+        
+        # Update all UI elements
+        QTimer.singleShot(0, main_window.update_tracked_list)  # Update tracked list
+        QTimer.singleShot(100, main_window.refresh_card_statuses)  # Refresh all card statuses
+        QTimer.singleShot(200, lambda: main_window.grid_layout.update())  # Force grid layout update
+        
+        # Show success message
+        QMessageBox.information(self, "Success", f"Stopped tracking: {self.series_name}")
         
     def update_status(self):
         status = self.check_series_status()
@@ -612,6 +634,63 @@ class TrackedAnimeCard(FlippableCard):
             
         except Exception:
             return "Ongoing"  # Default to ongoing if check fails
+        
+    def update_countdown(self):
+        try:
+            schedule_data = self.manager.fetch_schedule()
+            if not schedule_data:
+                self.countdown_label.setText("Schedule unavailable")
+                return
+                
+            current_time = datetime.utcnow()
+            next_time = None
+            
+            for day, shows in schedule_data["schedule"].items():
+                for show in shows:
+                    if self.series_name in show['title']:
+                        time_str = show['time']
+                        anime_time = datetime.strptime(time_str, "%H:%M")
+                        
+                        # Get day index (0 = Monday, 6 = Sunday)
+                        day_index = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"].index(day.lower())
+                        
+                        # Get current day index
+                        current_day_index = current_time.weekday()
+                        
+                        # Calculate days until next episode
+                        days_until = day_index - current_day_index
+                        if days_until <= 0:  # If day has passed this week, add 7 days
+                            days_until += 7
+                            
+                        # Set the date for the next episode
+                        anime_time = anime_time.replace(
+                            year=current_time.year,
+                            month=current_time.month,
+                            day=current_time.day + days_until
+                        )
+                        
+                        if next_time is None or anime_time < next_time:
+                            next_time = anime_time
+            
+            if next_time:
+                time_until = next_time - current_time
+                days = time_until.days
+                hours = int((time_until.total_seconds() % (24 * 3600)) // 3600)
+                minutes = int((time_until.total_seconds() % 3600) // 60)
+                
+                countdown_text = "Next episode in: "
+                if days > 0:
+                    countdown_text += f"{days}d "
+                countdown_text += f"{hours}h {minutes}m"
+                
+                self.countdown_label.setText(countdown_text)
+                self.countdown_label.show()
+            else:
+                self.countdown_label.setText("No scheduled episodes found")
+                
+        except Exception as e:
+            print(f"Error updating countdown: {str(e)}")
+            self.countdown_label.setText("Schedule unavailable")
 
 class DownloadCard(FlippableCard):
     def __init__(self, filename, manager, parent=None):
@@ -843,10 +922,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("ANICHAIN")
         self.setMinimumSize(800, 600)
         
-        # Resize timer for debouncing
-        self.resize_timer = QTimer()
-        self.resize_timer.setSingleShot(True)
-        self.resize_timer.timeout.connect(self.handle_resize_timeout)
+        # Cache for series status
+        self.series_status_cache = {}
         
         # Create central widget with layout
         central_widget = QWidget()
@@ -858,594 +935,63 @@ class MainWindow(QMainWindow):
         # Setup UI components first
         self.setup_ui()
         
-        # Add status bar for qBittorrent
-        status_bar = QWidget()
-        status_bar.setFixedHeight(30)
-        status_bar.setStyleSheet("background-color: white; border-top: 1px solid #e0e0e0;")
-        status_layout = QHBoxLayout(status_bar)
-        status_layout.setContentsMargins(20, 0, 20, 0)
-        
-        # Status indicator circle
-        self.status_circle = QLabel("●")
-        self.status_circle.setFixedWidth(20)
-        
-        # Status text
-        self.status_text = QLabel()
-        self.status_text.setStyleSheet("font-size: 12px;")
-        
-        # Reconnect button (hidden by default)
-        self.reconnect_btn = QPushButton("Reconnect")
-        self.reconnect_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #ff3b30;
-                color: white;
-                border-radius: 3px;
-                padding: 3px 8px;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background-color: #ff453a;
-            }
-        """)
-        self.reconnect_btn.clicked.connect(self.ensure_qbittorrent_connection)
-        self.reconnect_btn.hide()
-        
-        status_layout.addStretch()
-        status_layout.addWidget(self.status_circle)
-        status_layout.addWidget(self.status_text)
-        status_layout.addWidget(self.reconnect_btn)
-        
-        main_layout.addWidget(status_bar)
-        
-        # Ensure qBittorrent connection before proceeding
-        if not self.ensure_qbittorrent_connection():
-            sys.exit(1)
-            
-        # Update qBittorrent status
-        self.update_qbittorrent_status()
+        # Add status bar for qBittorrent at the bottom
+        self.setup_status_bar()
         
         # Setup timers
         self.setup_timers()
         
-        # Handle Ctrl+C
-        import signal
-        signal.signal(signal.SIGINT, self.handle_interrupt)
+        # Load initial data asynchronously
+        QTimer.singleShot(0, self.load_initial_data)
         
-    def handle_interrupt(self, signum, frame):
-        print("\nClosing application...")
-        QApplication.quit()
-        
-    def ensure_qbittorrent_connection(self):
+    def load_initial_data(self):
+        """Load initial data asynchronously"""
+        # Try to connect to qBittorrent first
         if not self.manager.setup_qbittorrent():
-            dialog = QBittorrentDialog(self.manager, self)
-            result = dialog.exec()
-            return result == QDialog.DialogCode.Accepted
-        return True
+            # If connection fails, show the dialog
+            QTimer.singleShot(0, self.show_qbittorrent_dialog)
+        else:
+            self.update_qbittorrent_status()
+            
+        # Load other data
+        QTimer.singleShot(100, self.load_feed)
+        QTimer.singleShot(200, self.load_schedule)
+        QTimer.singleShot(300, self.update_tracked_list)
+        QTimer.singleShot(400, self.update_downloads_list)
         
-    def update_qbittorrent_status(self):
+    def check_series_status(self, series_name):
+        """Check series status with caching"""
+        if series_name in self.series_status_cache:
+            return self.series_status_cache[series_name]
+            
         try:
-            if self.manager.qb_client and self.manager.setup_qbittorrent():
-                self.status_circle.setStyleSheet("color: #00b894; font-weight: bold;")
-                self.status_text.setText("qBittorrent Connected")
-                self.status_text.setStyleSheet("color: #00b894;")
-                self.reconnect_btn.hide()
-            else:
-                self.status_circle.setStyleSheet("color: #ff3b30; font-weight: bold;")
-                self.status_text.setText("qBittorrent Disconnected")
-                self.status_text.setStyleSheet("color: #ff3b30;")
-                self.reconnect_btn.show()
-        except RuntimeError:
-            # Handle case where widgets have been deleted
-            pass
-        except Exception as e:
-            print(f"Error updating qBittorrent status: {str(e)}")
-        
-    def check_qbittorrent_connection(self):
-        self.update_qbittorrent_status()
-        
-    def setup_ui(self):
-        main_widget = QWidget()
-        self.setCentralWidget(main_widget)
-        main_layout = QVBoxLayout(main_widget)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
-        
-        # Top navigation bar
-        nav_bar = QWidget()
-        nav_bar.setStyleSheet("""
-            QWidget {
-                background-color: #ffffff;
-                border-bottom: 1px solid #e0e0e0;
-            }
-        """)
-        nav_layout = QHBoxLayout(nav_bar)
-        nav_layout.setContentsMargins(20, 10, 20, 10)
-        nav_layout.setSpacing(20)
-        
-        # Logo
-        logo = QLabel("ANICHAIN")
-        logo.setStyleSheet("""
-            QLabel {
-                color: #333333;
-                font-size: 24px;
-                font-weight: bold;
-            }
-        """)
-        nav_layout.addWidget(logo)
-        
-        # Navigation buttons with correct names
-        nav_buttons = ["Available", "Schedule", "Tracked", "Downloads", "Settings"]
-        self.nav_button_group = QButtonGroup(self)
-        self.nav_button_group.buttonClicked.connect(self.handle_nav_click)
-        
-        for text in nav_buttons:
-            btn = QPushButton(text)
-            btn.setCheckable(True)
-            btn.setStyleSheet("""
-                QPushButton {
-                    color: #666666;
-                    border: none;
-                    padding: 8px 16px;
-                    font-size: 14px;
-                    background: transparent;
-                }
-                QPushButton:hover {
-                    color: #333333;
-                }
-                QPushButton:checked {
-                    color: #007AFF;
-                    font-weight: bold;
-                }
-            """)
-            nav_layout.addWidget(btn)
-            self.nav_button_group.addButton(btn)
-        
-        # Search bar and button
-        search_frame = QFrame()
-        search_frame.setStyleSheet("""
-            QFrame {
-                background-color: #f5f5f7;
-                border-radius: 20px;
-                padding: 5px;
-            }
-        """)
-        search_layout = QHBoxLayout(search_frame)
-        search_layout.setContentsMargins(15, 5, 15, 5)
-        
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Search anime")
-        self.search_input.setStyleSheet("""
-            QLineEdit {
-                border: none;
-                background: transparent;
-                color: #333333;
-                font-size: 14px;
-            }
-        """)
-        self.search_input.returnPressed.connect(self.perform_search)
-        search_layout.addWidget(self.search_input)
-        
-        search_btn = QPushButton("Search")
-        search_btn.clicked.connect(self.perform_search)
-        search_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #007AFF;
-                color: white;
-                border-radius: 20px;
-                padding: 8px 24px;
-                font-size: 14px;
-            }
-            QPushButton:hover {
-                background-color: #0066CC;
-            }
-        """)
-        nav_layout.addWidget(search_frame)
-        nav_layout.addWidget(search_btn)
-        
-        main_layout.addWidget(nav_bar)
-        
-        # Content area
-        content_widget = QWidget()
-        content_layout = QVBoxLayout(content_widget)
-        content_layout.setContentsMargins(20, 20, 20, 20)
-        content_layout.setSpacing(20)
-        
-        # Create stacked widget for content
-        self.content_stack = QStackedWidget()
-        content_layout.addWidget(self.content_stack)
-        
-        # Add pages
-        self.setup_anime_page()
-        self.setup_schedule_page()
-        self.setup_tracked_page()
-        self.setup_downloads_page()
-        self.setup_settings_page()
-        
-        main_layout.addWidget(content_widget)
-        
-    def handle_nav_click(self, button):
-        index = self.nav_button_group.buttons().index(button)
-        self.content_stack.setCurrentIndex(index)
-        
-    def setup_anime_page(self):
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Scroll area for anime grid
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("""
-            QScrollArea {
-                border: none;
-                background-color: #ffffff;
-            }
-            QScrollBar:vertical {
-                border: none;
-                background: #f5f5f7;
-                width: 10px;
-                margin: 0px;
-            }
-            QScrollBar::handle:vertical {
-                background: #c1c1c1;
-                min-height: 30px;
-                border-radius: 5px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: #a8a8a8;
-            }
-        """)
-        
-        self.grid_widget = QWidget()
-        self.grid_layout = QGridLayout(self.grid_widget)
-        self.grid_layout.setSpacing(20)
-        scroll.setWidget(self.grid_widget)
-        
-        layout.addWidget(scroll)
-        self.content_stack.addWidget(page)
-        
-        # Load initial feed
-        self.load_feed()
-        
-    def setup_schedule_page(self):
-        schedule_page = QWidget()
-        layout = QVBoxLayout(schedule_page)
-        layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Header frame
-        header_frame = QWidget()
-        header_frame.setStyleSheet("""
-            QWidget {
-                background-color: white;
-                border-radius: 10px;
-            }
-        """)
-        header_layout = QHBoxLayout(header_frame)
-        
-        self.current_time_label = QLabel("Current Time: ")
-        self.current_time_label.setStyleSheet("""
-            QLabel {
-                color: #333333;
-                font-weight: bold;
-                font-size: 14px;
-            }
-        """)
-        header_layout.addWidget(self.current_time_label)
-        
-        # Initialize qBittorrent status
-        self.qb_status_label = QLabel()
-        if self.manager.qb_client:
-            self.qb_status_label.setText("qBittorrent: Connected ✓")
-            self.qb_status_label.setStyleSheet("color: #00b894; font-weight: bold; font-size: 14px;")
-        else:
-            self.qb_status_label.setText("qBittorrent: Disconnected ✗")
-            self.qb_status_label.setStyleSheet("color: #d63031; font-weight: bold; font-size: 14px;")
-        header_layout.addWidget(self.qb_status_label, alignment=Qt.AlignmentFlag.AlignRight)
-        
-        layout.addWidget(header_frame)
-        
-        self.next_anime_label = QLabel("Next Episode: ")
-        self.next_anime_label.setStyleSheet("""
-            QLabel {
-                color: #333333;
-                font-weight: bold;
-                font-size: 14px;
-                margin-top: 10px;
-            }
-        """)
-        layout.addWidget(self.next_anime_label)
-        
-        self.schedule_text = QTextEdit()
-        self.schedule_text.setReadOnly(True)
-        self.schedule_text.setStyleSheet("""
-            QTextEdit {
-                background-color: white;
-                border: 1px solid #e0e0e0;
-                border-radius: 10px;
-                padding: 15px;
-                color: #333333;
-                font-size: 14px;
-            }
-        """)
-        layout.addWidget(self.schedule_text)
-        
-        self.content_stack.addWidget(schedule_page)
-        self.load_schedule()
-        
-    def setup_tracked_page(self):
-        tracked_page = QWidget()
-        layout = QVBoxLayout(tracked_page)
-        layout.setContentsMargins(0, 0, 0, 0)
-        
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("""
-            QScrollArea {
-                border: none;
-                background-color: white;
-            }
-        """)
-        
-        tracked_widget = QWidget()
-        self.tracked_layout = QGridLayout(tracked_widget)
-        self.tracked_layout.setSpacing(20)
-        scroll.setWidget(tracked_widget)
-        
-        layout.addWidget(scroll)
-        self.content_stack.addWidget(tracked_page)
-        self.update_tracked_list()
-        
-    def setup_downloads_page(self):
-        downloads_page = QWidget()
-        layout = QVBoxLayout(downloads_page)
-        layout.setContentsMargins(0, 0, 0, 0)
-        
-        self.folder_label = QLabel(f"Download Folder: {self.manager.settings['download_folder']}")
-        self.folder_label.setStyleSheet("""
-            QLabel {
-                color: #333333;
-                font-weight: bold;
-                font-size: 14px;
-                margin-bottom: 10px;
-            }
-        """)
-        layout.addWidget(self.folder_label)
-        
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("""
-            QScrollArea {
-                border: none;
-                background-color: white;
-            }
-        """)
-        
-        downloads_widget = QWidget()
-        self.downloads_layout = QGridLayout(downloads_widget)
-        self.downloads_layout.setSpacing(20)
-        scroll.setWidget(downloads_widget)
-        
-        layout.addWidget(scroll)
-        self.content_stack.addWidget(downloads_page)
-        self.update_downloads_list()
-        
-    def setup_settings_page(self):
-        settings_page = QWidget()
-        layout = QVBoxLayout(settings_page)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(15)
-        
-        settings_frame = QFrame()
-        settings_frame.setStyleSheet("""
-            QFrame {
-                background-color: white;
-                border: 1px solid #e0e0e0;
-                border-radius: 10px;
-                padding: 20px;
-            }
-            QLabel {
-                color: #333333;
-                font-size: 14px;
-                margin-top: 10px;
-            }
-            QLineEdit {
-                border: 1px solid #e0e0e0;
-                border-radius: 5px;
-                padding: 8px;
-                color: #333333;
-                background-color: white;
-                font-size: 14px;
-            }
-            QLineEdit:focus {
-                border-color: #007AFF;
-            }
-            QPushButton {
-                background-color: #007AFF;
-                color: white;
-                border-radius: 5px;
-                padding: 8px 16px;
-                font-size: 14px;
-            }
-            QPushButton:hover {
-                background-color: #0066CC;
-            }
-        """)
-        settings_layout = QVBoxLayout(settings_frame)
-        settings_layout.setSpacing(15)
-        
-        # Download folder
-        settings_layout.addWidget(QLabel("Download Folder:"))
-        folder_frame = QWidget()
-        folder_layout = QHBoxLayout(folder_frame)
-        folder_layout.setContentsMargins(0, 0, 0, 0)
-        
-        self.folder_entry = QLineEdit(self.manager.settings["download_folder"])
-        folder_layout.addWidget(self.folder_entry)
-        
-        browse_button = QPushButton("Browse")
-        browse_button.clicked.connect(self.browse_folder)
-        folder_layout.addWidget(browse_button)
-        settings_layout.addWidget(folder_frame)
-        
-        # RSS URL
-        settings_layout.addWidget(QLabel("RSS URL:"))
-        self.rss_entry = QLineEdit(self.manager.settings["rss_url"])
-        settings_layout.addWidget(self.rss_entry)
-        
-        # qBittorrent settings
-        settings_layout.addWidget(QLabel("qBittorrent Settings"))
-        
-        settings_layout.addWidget(QLabel("Host:"))
-        self.qb_host_entry = QLineEdit(self.manager.settings["qb_host"])
-        settings_layout.addWidget(self.qb_host_entry)
-        
-        settings_layout.addWidget(QLabel("Username:"))
-        self.qb_username_entry = QLineEdit(self.manager.settings["qb_username"])
-        settings_layout.addWidget(self.qb_username_entry)
-        
-        settings_layout.addWidget(QLabel("Password:"))
-        self.qb_password_entry = QLineEdit(self.manager.settings["qb_password"])
-        self.qb_password_entry.setEchoMode(QLineEdit.EchoMode.Password)
-        settings_layout.addWidget(self.qb_password_entry)
-        
-        # Save button
-        save_button = QPushButton("Save Settings")
-        save_button.clicked.connect(self.save_settings)
-        settings_layout.addWidget(save_button, alignment=Qt.AlignmentFlag.AlignRight)
-        
-        layout.addWidget(settings_frame)
-        layout.addStretch()
-        self.content_stack.addWidget(settings_page)
-        
-    def setup_timers(self):
-        # Add qBittorrent connection check every minute
-        self.qb_timer = QTimer()
-        self.qb_timer.timeout.connect(self.check_qbittorrent_connection)
-        self.qb_timer.start(60000)  # Check every minute
-        
-        # Existing timers
-        self.clock_timer = QTimer()
-        self.clock_timer.timeout.connect(self.update_clock)
-        self.clock_timer.start(1000)
-        
-        self.schedule_timer = QTimer()
-        self.schedule_timer.timeout.connect(self.load_schedule)
-        self.schedule_timer.start(300000)
-        
-        # Update downloads more frequently to show progress
-        self.downloads_timer = QTimer()
-        self.downloads_timer.timeout.connect(self.update_downloads_list)
-        self.downloads_timer.start(5000)  # Update every 5 seconds
-        
-        self.feed_timer = QTimer()
-        self.feed_timer.timeout.connect(self.load_feed)
-        self.feed_timer.start(300000)
-        
-    def load_feed(self):
-        feed = self.manager.fetch_rss_feed()
-        if feed:
-            self.display_anime_tiles(feed.entries)
+            import requests
+            import time
             
-    def display_anime_tiles(self, entries):
-        # Clear existing items
-        for i in reversed(range(self.grid_layout.count())): 
-            self.grid_layout.itemAt(i).widget().setParent(None)
+            # Clean up title for search
+            search_title = series_name.replace("[SubsPlease]", "").strip()
             
-        # Determine number of columns based on window width
-        window_width = self.width()
-        if window_width >= 1600:
-            columns = 7  # Large window
-        elif window_width >= 1200:
-            columns = 5  # Medium window
-        else:
-            columns = 3  # Small window
+            # Search for anime
+            response = requests.get(
+                f"https://api.jikan.moe/v4/anime",
+                params={"q": search_title, "limit": 1},
+                timeout=10
+            )
             
-        # Add new items
-        for i, entry in enumerate(entries):
-            card = AnimeCard(entry.get("title", "No Title"), self.manager)
-            card.clicked.connect(self.on_anime_clicked)
-            card.setFixedSize(220, 380)  # Fixed size for entire card
-            self.grid_layout.addWidget(card, i // columns, i % columns)
+            if response.status_code == 200:
+                data = response.json()
+                if data["data"]:
+                    anime = data["data"][0]
+                    status = anime.get("status", "").lower()
+                    result = "Ended" if "finished" in status or "completed" in status else "Ongoing"
+                    self.series_status_cache[series_name] = result
+                    return result
             
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        # Reset and restart the timer
-        self.resize_timer.stop()
-        self.resize_timer.start(150)  # Wait for 150ms of no resize events
-        
-    def handle_resize_timeout(self):
-        # Only refresh the current visible page
-        current_index = self.content_stack.currentIndex()
-        if current_index == 0:  # Available page
-            feed = self.manager.fetch_rss_feed()
-            if feed:
-                self.display_anime_tiles(feed.entries)
-        elif current_index == 2:  # Tracked page
-            self.update_tracked_list()
-        elif current_index == 3:  # Downloads page
-            self.update_downloads_list()
+            return "Ongoing"
             
-    def on_anime_clicked(self, title):
-        # Extract series name
-        series_name = title.replace("[SubsPlease]", "").strip().split(" - ")[0]
-        
-        # Check if already tracking
-        is_tracked = any(series_name in anime for anime in self.manager.tracked_anime)
-        
-        if is_tracked:
-            # Just untrack series without deleting files
-            self.manager.tracked_anime = [
-                anime for anime in self.manager.tracked_anime
-                if series_name not in anime
-            ]
-            self.manager.save_tracked_anime(self.manager.tracked_anime)
+        except Exception:
+            return "Ongoing"  # Default to ongoing if check fails
             
-            # Update UI safely
-            try:
-                self.update_tracked_list()
-                self.refresh_card_statuses()
-                QMessageBox.information(self, "Success", f"Stopped tracking: {series_name}")
-            except Exception as e:
-                print(f"Error updating UI: {str(e)}")
-            return
-            
-        # If not tracked, proceed with tracking and downloading
-        feed = self.manager.fetch_rss_feed()
-        if not feed:
-            QMessageBox.warning(self, "Error", "Could not fetch RSS feed")
-            return
-            
-        for entry in feed.entries:
-            if entry.get("title") == title:
-                if not self.manager.qb_client:
-                    if not self.ensure_qbittorrent_connection():
-                        QMessageBox.critical(self, "Error", "Not connected to qBittorrent")
-                        return
-                
-                # Add torrent with category
-                if self.manager.add_torrent(entry.get("link"), category="Anime"):
-                    self.manager.tracked_anime.append(series_name)
-                    self.manager.save_tracked_anime(self.manager.tracked_anime)
-                    
-                    # Update UI safely
-                    try:
-                        self.update_tracked_list()
-                        self.refresh_card_statuses()
-                        QMessageBox.information(self, "Success", 
-                            f"Started downloading: {title}\nTracking series: {series_name}")
-                    except Exception as e:
-                        print(f"Error updating UI: {str(e)}")
-                else:
-                    QMessageBox.warning(self, "Error", 
-                        f"Failed to start download for: {title}")
-                return
-                
-        QMessageBox.warning(self, "Error", f"Could not find torrent link for: {title}")
-        
-    def update_clock(self):
-        current_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-        self.current_time_label.setText(f"Current Time: {current_time}")
-        
     def load_schedule(self):
         schedule_data = self.manager.fetch_schedule()
         if not schedule_data:
@@ -1454,13 +1000,54 @@ class MainWindow(QMainWindow):
             
         current_time = datetime.utcnow()
         next_anime = None
-        schedule_text = ""
+        
+        # Create a styled schedule layout
+        schedule_html = """
+        <style>
+            .schedule-container {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+                padding: 20px;
+            }
+            .day-header {
+                font-size: 18px;
+                font-weight: bold;
+                color: #333;
+                margin: 15px 0 10px 0;
+                padding-bottom: 5px;
+                border-bottom: 2px solid #007AFF;
+            }
+            .show-item {
+                padding: 8px 15px;
+                margin: 5px 0;
+                background-color: #f8f9fa;
+                border-radius: 5px;
+                font-size: 14px;
+            }
+            .show-item.next {
+                background-color: #e3f2fd;
+                border-left: 4px solid #007AFF;
+            }
+            .show-item.tracked {
+                background-color: #e6fff7;
+                border-left: 4px solid #00b894;
+            }
+            .time {
+                color: #666;
+                font-weight: 500;
+            }
+        </style>
+        <div class='schedule-container'>
+        """
         
         for day, shows in schedule_data["schedule"].items():
-            schedule_text += f"\n{day}:\n"
+            schedule_html += f"<div class='day-header'>{day.capitalize()}</div>"
+            
             for show in shows:
                 time_str = show['time']
                 title = show['title']
+                
+                # Check if show is being tracked
+                is_tracked = any(title in anime for anime in self.manager.tracked_anime)
                 
                 anime_time = datetime.strptime(time_str, "%H:%M")
                 anime_time = anime_time.replace(
@@ -1469,13 +1056,26 @@ class MainWindow(QMainWindow):
                     day=current_time.day
                 )
                 
-                if anime_time > current_time and (next_anime is None or anime_time < next_anime[1]):
+                is_next = anime_time > current_time and (next_anime is None or anime_time < next_anime[1])
+                if is_next:
                     next_anime = (title, anime_time)
-                    schedule_text += f"  → {time_str} UTC - {title} (Next)\n"
-                else:
-                    schedule_text += f"  {time_str} UTC - {title}\n"
+                
+                # Determine class based on status
+                classes = ['show-item']
+                if is_next:
+                    classes.append('next')
+                if is_tracked:
+                    classes.append('tracked')
+                
+                schedule_html += f"""
+                <div class='{' '.join(classes)}'>
+                    <span class='time'>{time_str} UTC</span> - {title}
+                    {' (Next)' if is_next else ''}
+                </div>
+                """
         
-        self.schedule_text.setText(schedule_text)
+        schedule_html += "</div>"
+        self.schedule_text.setHtml(schedule_html)
         
         if next_anime:
             time_until = next_anime[1] - current_time
@@ -1484,7 +1084,7 @@ class MainWindow(QMainWindow):
             self.next_anime_label.setText(
                 f"Next Episode: {next_anime[0]} at {next_anime[1].strftime('%H:%M UTC')} (in {hours}h {minutes}m)"
             )
-            
+        
     def update_tracked_list(self):
         # Clear existing items
         for i in reversed(range(self.tracked_layout.count())):
@@ -1614,6 +1214,619 @@ class MainWindow(QMainWindow):
                 self.refresh_card_statuses()
                 return
 
+    def setup_status_bar(self):
+        """Setup the qBittorrent status bar"""
+        self.statusBar().setFixedHeight(30)
+        self.statusBar().setStyleSheet("""
+            QStatusBar {
+                background-color: white;
+                border-top: 1px solid #e0e0e0;
+            }
+        """)
+        
+        # Create a widget for status items
+        status_widget = QWidget()
+        status_layout = QHBoxLayout(status_widget)
+        status_layout.setContentsMargins(20, 0, 20, 0)
+        
+        # Status indicator circle
+        self.status_circle = QLabel("●")
+        self.status_circle.setFixedWidth(20)
+        
+        # Status text
+        self.status_text = QLabel()
+        self.status_text.setStyleSheet("font-size: 12px;")
+        
+        # Reconnect button
+        self.reconnect_btn = QPushButton("Reconnect")
+        self.reconnect_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #ff3b30;
+                color: white;
+                border-radius: 3px;
+                padding: 3px 8px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #ff453a;
+            }
+        """)
+        self.reconnect_btn.clicked.connect(self.show_qbittorrent_dialog)
+        self.reconnect_btn.hide()
+        
+        status_layout.addStretch()
+        status_layout.addWidget(self.status_circle)
+        status_layout.addWidget(self.status_text)
+        status_layout.addWidget(self.reconnect_btn)
+        
+        # Add the status widget to the status bar
+        self.statusBar().addPermanentWidget(status_widget)
+        
+    def on_anime_clicked(self, title):
+        """Handle anime card click with optimized tracking"""
+        # Extract series name
+        series_name = title.replace("[SubsPlease]", "").strip().split(" - ")[0]
+        
+        # Check if already tracking
+        is_tracked = any(series_name in anime for anime in self.manager.tracked_anime)
+        
+        if is_tracked:
+            # Just untrack series without deleting files
+            self.manager.tracked_anime = [
+                anime for anime in self.manager.tracked_anime
+                if series_name not in anime
+            ]
+            self.manager.save_tracked_anime(self.manager.tracked_anime)
+            
+            # Update UI safely
+            QTimer.singleShot(0, lambda: self.update_tracked_list())
+            QTimer.singleShot(100, lambda: self.refresh_card_statuses())
+            QMessageBox.information(self, "Success", f"Stopped tracking: {series_name}")
+            return
+            
+        # If not tracked, proceed with tracking and downloading
+        feed = self.manager.fetch_rss_feed()
+        if not feed:
+            QMessageBox.warning(self, "Error", "Could not fetch RSS feed")
+            return
+            
+        for entry in feed.entries:
+            if entry.get("title") == title:
+                if not self.manager.qb_client:
+                    if not self.ensure_qbittorrent_connection():
+                        QMessageBox.critical(self, "Error", "Not connected to qBittorrent")
+                        return
+                
+                # Add torrent with category
+                if self.manager.add_torrent(entry.get("link"), category="Anime"):
+                    self.manager.tracked_anime.append(series_name)
+                    self.manager.save_tracked_anime(self.manager.tracked_anime)
+                    
+                    # Update UI safely using timers
+                    QTimer.singleShot(0, lambda: self.update_tracked_list())
+                    QTimer.singleShot(100, lambda: self.refresh_card_statuses())
+                    QMessageBox.information(self, "Success", 
+                        f"Started downloading: {title}\nTracking series: {series_name}")
+                else:
+                    QMessageBox.warning(self, "Error", 
+                        f"Failed to start download for: {title}")
+                return
+                
+        QMessageBox.warning(self, "Error", f"Could not find torrent link for: {title}")
+
+    def setup_ui(self):
+        """Setup the main UI components"""
+        # Top navigation bar
+        nav_bar = QWidget()
+        nav_bar.setStyleSheet("""
+            QWidget {
+                background-color: #ffffff;
+                border-bottom: 1px solid #e0e0e0;
+            }
+        """)
+        nav_layout = QHBoxLayout(nav_bar)
+        nav_layout.setContentsMargins(20, 10, 20, 10)
+        nav_layout.setSpacing(20)
+        
+        # Logo
+        logo = QLabel("ANICHAIN")
+        logo.setStyleSheet("""
+            QLabel {
+                color: #333333;
+                font-size: 24px;
+                font-weight: bold;
+            }
+        """)
+        nav_layout.addWidget(logo)
+        
+        # Navigation buttons
+        nav_buttons = ["Available", "Schedule", "Tracked", "Downloads", "Settings"]
+        self.nav_button_group = QButtonGroup(self)
+        self.nav_button_group.buttonClicked.connect(self.handle_nav_click)
+        
+        for text in nav_buttons:
+            btn = QPushButton(text)
+            btn.setCheckable(True)
+            btn.setStyleSheet("""
+                QPushButton {
+                    color: #666666;
+                    border: none;
+                    padding: 8px 16px;
+                    font-size: 14px;
+                    background: transparent;
+                }
+                QPushButton:hover {
+                    color: #333333;
+                }
+                QPushButton:checked {
+                    color: #007AFF;
+                    font-weight: bold;
+                }
+            """)
+            nav_layout.addWidget(btn)
+            self.nav_button_group.addButton(btn)
+        
+        # Search bar
+        search_frame = QFrame()
+        search_frame.setStyleSheet("""
+            QFrame {
+                background-color: #f5f5f7;
+                border-radius: 20px;
+                padding: 5px;
+            }
+        """)
+        search_layout = QHBoxLayout(search_frame)
+        search_layout.setContentsMargins(15, 5, 15, 5)
+        
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Search anime")
+        self.search_input.setStyleSheet("""
+            QLineEdit {
+                border: none;
+                background: transparent;
+                color: #333333;
+                font-size: 14px;
+            }
+        """)
+        self.search_input.returnPressed.connect(self.perform_search)
+        search_layout.addWidget(self.search_input)
+        
+        search_btn = QPushButton("Search")
+        search_btn.clicked.connect(self.perform_search)
+        search_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #007AFF;
+                color: white;
+                border-radius: 15px;
+                padding: 8px 20px;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #0066CC;
+            }
+        """)
+        nav_layout.addWidget(search_frame)
+        nav_layout.addWidget(search_btn)
+        
+        # Add navigation bar to main layout
+        main_layout = self.centralWidget().layout()
+        main_layout.addWidget(nav_bar)
+        
+        # Content area
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(20, 20, 20, 20)
+        content_layout.setSpacing(20)
+        
+        # Create stacked widget for content
+        self.content_stack = QStackedWidget()
+        content_layout.addWidget(self.content_stack)
+        
+        # Add pages
+        self.setup_anime_page()
+        self.setup_schedule_page()
+        self.setup_tracked_page()
+        self.setup_downloads_page()
+        self.setup_settings_page()
+        
+        main_layout.addWidget(content_widget)
+        
+    def handle_nav_click(self, button):
+        """Handle navigation button clicks"""
+        index = self.nav_button_group.buttons().index(button)
+        self.content_stack.setCurrentIndex(index)
+        
+    def setup_anime_page(self):
+        """Setup the available anime page"""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Scroll area for anime grid
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                background-color: #ffffff;
+            }
+            QScrollBar:vertical {
+                border: none;
+                background: #f5f5f7;
+                width: 10px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #c1c1c1;
+                min-height: 30px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #a8a8a8;
+            }
+        """)
+        
+        self.grid_widget = QWidget()
+        self.grid_layout = QGridLayout(self.grid_widget)
+        self.grid_layout.setSpacing(20)
+        scroll.setWidget(self.grid_widget)
+        
+        layout.addWidget(scroll)
+        self.content_stack.addWidget(page)
+        
+    def setup_schedule_page(self):
+        """Setup the schedule page"""
+        schedule_page = QWidget()
+        layout = QVBoxLayout(schedule_page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Header with current time
+        self.current_time_label = QLabel()
+        self.current_time_label.setStyleSheet("""
+            QLabel {
+                color: #333333;
+                font-weight: bold;
+                font-size: 14px;
+            }
+        """)
+        layout.addWidget(self.current_time_label)
+        
+        # Next anime label
+        self.next_anime_label = QLabel()
+        self.next_anime_label.setStyleSheet("""
+            QLabel {
+                color: #333333;
+                font-weight: bold;
+                font-size: 14px;
+            }
+        """)
+        layout.addWidget(self.next_anime_label)
+        
+        # Schedule text area
+        self.schedule_text = QTextEdit()
+        self.schedule_text.setReadOnly(True)
+        self.schedule_text.setStyleSheet("""
+            QTextEdit {
+                background-color: white;
+                border: 1px solid #e0e0e0;
+                border-radius: 10px;
+                padding: 15px;
+                color: #333333;
+                font-size: 14px;
+            }
+        """)
+        layout.addWidget(self.schedule_text)
+        
+        self.content_stack.addWidget(schedule_page)
+        
+    def setup_tracked_page(self):
+        """Setup the tracked anime page"""
+        tracked_page = QWidget()
+        layout = QVBoxLayout(tracked_page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                background-color: white;
+            }
+        """)
+        
+        tracked_widget = QWidget()
+        self.tracked_layout = QGridLayout(tracked_widget)
+        self.tracked_layout.setSpacing(20)
+        scroll.setWidget(tracked_widget)
+        
+        layout.addWidget(scroll)
+        self.content_stack.addWidget(tracked_page)
+        
+    def setup_downloads_page(self):
+        """Setup the downloads page"""
+        downloads_page = QWidget()
+        layout = QVBoxLayout(downloads_page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.folder_label = QLabel(f"Download Folder: {self.manager.settings['download_folder']}")
+        self.folder_label.setStyleSheet("""
+            QLabel {
+                color: #333333;
+                font-weight: bold;
+                font-size: 14px;
+                margin-bottom: 10px;
+            }
+        """)
+        layout.addWidget(self.folder_label)
+        
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                background-color: white;
+            }
+        """)
+        
+        downloads_widget = QWidget()
+        self.downloads_layout = QGridLayout(downloads_widget)
+        self.downloads_layout.setSpacing(20)
+        scroll.setWidget(downloads_widget)
+        
+        layout.addWidget(scroll)
+        self.content_stack.addWidget(downloads_page)
+        
+    def setup_settings_page(self):
+        """Setup the settings page"""
+        settings_page = QWidget()
+        layout = QVBoxLayout(settings_page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        settings_frame = QFrame()
+        settings_frame.setStyleSheet("""
+            QFrame {
+                background-color: white;
+                border: 1px solid #e0e0e0;
+                border-radius: 10px;
+                padding: 20px;
+            }
+        """)
+        settings_layout = QVBoxLayout(settings_frame)
+        
+        # Download folder
+        settings_layout.addWidget(QLabel("Download Folder:"))
+        folder_frame = QWidget()
+        folder_layout = QHBoxLayout(folder_frame)
+        folder_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.folder_entry = QLineEdit(self.manager.settings["download_folder"])
+        folder_layout.addWidget(self.folder_entry)
+        
+        browse_button = QPushButton("Browse")
+        browse_button.clicked.connect(self.browse_folder)
+        folder_layout.addWidget(browse_button)
+        settings_layout.addWidget(folder_frame)
+        
+        # RSS URL
+        settings_layout.addWidget(QLabel("RSS URL:"))
+        self.rss_entry = QLineEdit(self.manager.settings["rss_url"])
+        settings_layout.addWidget(self.rss_entry)
+        
+        # qBittorrent settings
+        settings_layout.addWidget(QLabel("qBittorrent Settings"))
+        
+        settings_layout.addWidget(QLabel("Host:"))
+        self.qb_host_entry = QLineEdit(self.manager.settings["qb_host"])
+        settings_layout.addWidget(self.qb_host_entry)
+        
+        settings_layout.addWidget(QLabel("Username:"))
+        self.qb_username_entry = QLineEdit(self.manager.settings["qb_username"])
+        settings_layout.addWidget(self.qb_username_entry)
+        
+        settings_layout.addWidget(QLabel("Password:"))
+        self.qb_password_entry = QLineEdit(self.manager.settings["qb_password"])
+        self.qb_password_entry.setEchoMode(QLineEdit.EchoMode.Password)
+        settings_layout.addWidget(self.qb_password_entry)
+        
+        # Save button
+        save_button = QPushButton("Save Settings")
+        save_button.clicked.connect(self.save_settings)
+        save_button.setStyleSheet("""
+            QPushButton {
+                background-color: #007AFF;
+                color: white;
+                border-radius: 5px;
+                padding: 8px 16px;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #0066CC;
+            }
+        """)
+        settings_layout.addWidget(save_button, alignment=Qt.AlignmentFlag.AlignRight)
+        
+        layout.addWidget(settings_frame)
+        layout.addStretch()
+        self.content_stack.addWidget(settings_page)
+
+    def show_qbittorrent_dialog(self):
+        """Show the qBittorrent connection dialog"""
+        dialog = QBittorrentDialog(self.manager, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.update_qbittorrent_status()
+            
+    def update_qbittorrent_status(self):
+        """Update the qBittorrent connection status display"""
+        try:
+            if self.manager.qb_client and self.manager.setup_qbittorrent():
+                self.status_circle.setStyleSheet("color: #00b894; font-size: 14px; font-weight: bold;")
+                self.status_text.setText("qBittorrent Connected")
+                self.status_text.setStyleSheet("color: #00b894; font-weight: bold;")
+                self.reconnect_btn.hide()
+            else:
+                self.status_circle.setStyleSheet("color: #ff3b30; font-size: 14px; font-weight: bold;")
+                self.status_text.setText("qBittorrent Disconnected")
+                self.status_text.setStyleSheet("color: #ff3b30; font-weight: bold;")
+                self.reconnect_btn.show()
+        except Exception as e:
+            print(f"Error updating qBittorrent status: {str(e)}")
+            self.status_circle.setStyleSheet("color: #ff3b30; font-size: 14px; font-weight: bold;")
+            self.status_text.setText("qBittorrent Error")
+            self.status_text.setStyleSheet("color: #ff3b30; font-weight: bold;")
+            self.reconnect_btn.show()
+            
+    def ensure_qbittorrent_connection(self):
+        """Ensure there is a working qBittorrent connection"""
+        if not self.manager.qb_client or not self.manager.setup_qbittorrent():
+            dialog = QBittorrentDialog(self.manager, self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                self.update_qbittorrent_status()
+                return True
+            return False
+        return True
+
+    def load_feed(self):
+        """Load and display the RSS feed"""
+        feed = self.manager.fetch_rss_feed()
+        if feed:
+            self.display_anime_tiles(feed.entries)
+            
+    def display_anime_tiles(self, entries):
+        """Display anime tiles in the grid layout"""
+        # Clear existing items
+        for i in reversed(range(self.grid_layout.count())): 
+            self.grid_layout.itemAt(i).widget().setParent(None)
+            
+        # Determine number of columns based on window width
+        window_width = self.width()
+        if window_width >= 1600:
+            columns = 7  # Large window
+        elif window_width >= 1200:
+            columns = 5  # Medium window
+        else:
+            columns = 3  # Small window
+            
+        # Add new items
+        for i, entry in enumerate(entries):
+            card = AnimeCard(entry.get("title", "No Title"), self.manager)
+            card.clicked.connect(self.on_anime_clicked)
+            card.setFixedSize(220, 380)  # Fixed size for entire card
+            self.grid_layout.addWidget(card, i // columns, i % columns)
+            
+    def resizeEvent(self, event):
+        """Handle window resize events"""
+        super().resizeEvent(event)
+        # Reset and restart the timer
+        self.resize_timer.stop()
+        self.resize_timer.start(150)  # Wait for 150ms of no resize events
+        
+    def update_clock(self):
+        """Update the clock display"""
+        current_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        self.current_time_label.setText(f"Current Time: {current_time}")
+        
+    def setup_timers(self):
+        """Setup all application timers"""
+        # Add qBittorrent connection check every minute
+        self.qb_timer = QTimer()
+        self.qb_timer.timeout.connect(self.update_qbittorrent_status)
+        self.qb_timer.start(60000)  # Check every minute
+        
+        # Resize timer for debouncing
+        self.resize_timer = QTimer()
+        self.resize_timer.setSingleShot(True)
+        self.resize_timer.timeout.connect(self.handle_resize_timeout)
+        
+        # Clock timer
+        self.clock_timer = QTimer()
+        self.clock_timer.timeout.connect(self.update_clock)
+        self.clock_timer.start(1000)
+        
+        # Schedule timer
+        self.schedule_timer = QTimer()
+        self.schedule_timer.timeout.connect(self.load_schedule)
+        self.schedule_timer.start(300000)  # Every 5 minutes
+        
+        # Update downloads more frequently to show progress
+        self.downloads_timer = QTimer()
+        self.downloads_timer.timeout.connect(self.update_downloads_list)
+        self.downloads_timer.start(5000)  # Every 5 seconds
+        
+        # Feed refresh timer
+        self.feed_timer = QTimer()
+        self.feed_timer.timeout.connect(self.load_feed)
+        self.feed_timer.start(300000)  # Every 5 minutes
+        
+    def handle_resize_timeout(self):
+        """Handle resize timeout by refreshing the current page"""
+        # Only refresh the current visible page
+        current_index = self.content_stack.currentIndex()
+        if current_index == 0:  # Available page
+            feed = self.manager.fetch_rss_feed()
+            if feed:
+                self.display_anime_tiles(feed.entries)
+        elif current_index == 2:  # Tracked page
+            self.update_tracked_list()
+        elif current_index == 3:  # Downloads page
+            self.update_downloads_list()
+            
+    def delete_episode(self, filename):
+        """Delete an episode and remove it from qBittorrent"""
+        try:
+            # Remove from qBittorrent if it's in the queue
+            if self.manager.qb_client:
+                torrents = self.manager.qb_client.torrents_info()
+                for torrent in torrents:
+                    if filename in torrent.content_path:
+                        self.manager.qb_client.torrents_delete(
+                            delete_files=True,
+                            torrent_hashes=torrent.hash
+                        )
+                        break
+            
+            # Delete the file
+            file_path = os.path.join(self.manager.settings["download_folder"], filename)
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                
+            # Update the downloads list
+            self.update_downloads_list()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to delete file: {str(e)}")
+            
+    def update_progress(self):
+        """Update download progress for all cards"""
+        if not self.manager.qb_client:
+            return
+            
+        try:
+            torrents = self.manager.qb_client.torrents_info()
+            for i in range(self.downloads_layout.count()):
+                card = self.downloads_layout.itemAt(i).widget()
+                if isinstance(card, DownloadCard):
+                    for torrent in torrents:
+                        if card.filename in torrent.content_path:
+                            card.progress_bar.setValue(int(torrent.progress * 100))
+                            card.progress_bar.show()
+                            break
+                            
+        except Exception as e:
+            print(f"Error updating progress: {str(e)}")
+            
+    def closeEvent(self, event):
+        """Handle application close event"""
+        # Stop all timers
+        self.qb_timer.stop()
+        self.resize_timer.stop()
+        self.clock_timer.stop()
+        self.schedule_timer.stop()
+        self.downloads_timer.stop()
+        self.feed_timer.stop()
+        
+        # Accept the close event
+        event.accept()
+
 def main():
     app = QApplication(sys.argv)
     
@@ -1630,8 +1843,24 @@ def main():
     font = QFont(".AppleSystemUIFont", 10)  # Use system font
     app.setFont(font)
     
+    # Set up signal handling for Ctrl+C
+    import signal
+    def signal_handler(signum, frame):
+        print("\nClosing application...")
+        app.quit()
+    
+    # Register the signal handler
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    # Create and show the main window
     window = MainWindow()
     window.show()
+    
+    # Create a timer to process signals
+    timer = QTimer()
+    timer.timeout.connect(lambda: None)  # Let Python process events
+    timer.start(200)  # Check every 200ms
+    
     sys.exit(app.exec())
 
 if __name__ == "__main__":
