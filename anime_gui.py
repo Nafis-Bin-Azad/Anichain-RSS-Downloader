@@ -134,8 +134,7 @@ class AnimeCard(FlippableCard):
         # Image
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_label.setMinimumSize(200, 280)
-        self.image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.image_label.setFixedSize(200, 280)  # Fixed size for stability
         layout.addWidget(self.image_label)
         
         # Title
@@ -144,6 +143,7 @@ class AnimeCard(FlippableCard):
         self.title_label.setWordWrap(True)
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.title_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        self.title_label.setFixedHeight(40)  # Fixed height for title
         layout.addWidget(self.title_label)
         
         # Episode info
@@ -151,11 +151,13 @@ class AnimeCard(FlippableCard):
         self.episode_label = QLabel(episode_info)
         self.episode_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.episode_label.setStyleSheet("color: #666666;")
+        self.episode_label.setFixedHeight(20)  # Fixed height for episode info
         layout.addWidget(self.episode_label)
         
         # Status indicator
         self.status_label = QLabel()
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_label.setFixedHeight(20)  # Fixed height for status
         self.update_status()
         layout.addWidget(self.status_label)
         
@@ -414,8 +416,7 @@ class TrackedAnimeCard(FlippableCard):
         # Image
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_label.setMinimumSize(200, 280)
-        self.image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.image_label.setFixedSize(200, 280)  # Fixed size for stability
         layout.addWidget(self.image_label)
         
         # Title
@@ -671,8 +672,7 @@ class DownloadCard(FlippableCard):
         # Image
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_label.setMinimumSize(200, 280)
-        self.image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.image_label.setFixedSize(200, 280)  # Fixed size for stability
         layout.addWidget(self.image_label)
         
         # Series name
@@ -923,17 +923,23 @@ class MainWindow(QMainWindow):
         return True
         
     def update_qbittorrent_status(self):
-        if self.manager.qb_client and self.manager.setup_qbittorrent():
-            self.status_circle.setStyleSheet("color: #00b894; font-weight: bold;")
-            self.status_text.setText("qBittorrent Connected")
-            self.status_text.setStyleSheet("color: #00b894;")
-            self.reconnect_btn.hide()
-        else:
-            self.status_circle.setStyleSheet("color: #ff3b30; font-weight: bold;")
-            self.status_text.setText("qBittorrent Disconnected")
-            self.status_text.setStyleSheet("color: #ff3b30;")
-            self.reconnect_btn.show()
-            
+        try:
+            if self.manager.qb_client and self.manager.setup_qbittorrent():
+                self.status_circle.setStyleSheet("color: #00b894; font-weight: bold;")
+                self.status_text.setText("qBittorrent Connected")
+                self.status_text.setStyleSheet("color: #00b894;")
+                self.reconnect_btn.hide()
+            else:
+                self.status_circle.setStyleSheet("color: #ff3b30; font-weight: bold;")
+                self.status_text.setText("qBittorrent Disconnected")
+                self.status_text.setStyleSheet("color: #ff3b30;")
+                self.reconnect_btn.show()
+        except RuntimeError:
+            # Handle case where widgets have been deleted
+            pass
+        except Exception as e:
+            print(f"Error updating qBittorrent status: {str(e)}")
+        
     def check_qbittorrent_connection(self):
         self.update_qbittorrent_status()
         
@@ -1345,15 +1351,20 @@ class MainWindow(QMainWindow):
         for i in reversed(range(self.grid_layout.count())): 
             self.grid_layout.itemAt(i).widget().setParent(None)
             
-        # Calculate grid dimensions based on window size
-        available_width = self.grid_widget.width()
-        card_width = 250  # Minimum card width including margins
-        columns = max(1, available_width // card_width)
+        # Determine number of columns based on window width
+        window_width = self.width()
+        if window_width >= 1600:
+            columns = 7  # Large window
+        elif window_width >= 1200:
+            columns = 5  # Medium window
+        else:
+            columns = 3  # Small window
             
         # Add new items
         for i, entry in enumerate(entries):
             card = AnimeCard(entry.get("title", "No Title"), self.manager)
             card.clicked.connect(self.on_anime_clicked)
+            card.setFixedSize(220, 380)  # Fixed size for entire card
             self.grid_layout.addWidget(card, i // columns, i % columns)
             
     def resizeEvent(self, event):
@@ -1378,7 +1389,27 @@ class MainWindow(QMainWindow):
         # Extract series name
         series_name = title.replace("[SubsPlease]", "").strip().split(" - ")[0]
         
-        # Find the torrent link for this anime
+        # Check if already tracking
+        is_tracked = any(series_name in anime for anime in self.manager.tracked_anime)
+        
+        if is_tracked:
+            # Just untrack series without deleting files
+            self.manager.tracked_anime = [
+                anime for anime in self.manager.tracked_anime
+                if series_name not in anime
+            ]
+            self.manager.save_tracked_anime(self.manager.tracked_anime)
+            
+            # Update UI safely
+            try:
+                self.update_tracked_list()
+                self.refresh_card_statuses()
+                QMessageBox.information(self, "Success", f"Stopped tracking: {series_name}")
+            except Exception as e:
+                print(f"Error updating UI: {str(e)}")
+            return
+            
+        # If not tracked, proceed with tracking and downloading
         feed = self.manager.fetch_rss_feed()
         if not feed:
             QMessageBox.warning(self, "Error", "Could not fetch RSS feed")
@@ -1393,18 +1424,17 @@ class MainWindow(QMainWindow):
                 
                 # Add torrent with category
                 if self.manager.add_torrent(entry.get("link"), category="Anime"):
-                    # Only track if not already tracking
-                    if series_name not in [a.split(" - ")[0].replace("[SubsPlease]", "").strip() 
-                                         for a in self.manager.tracked_anime]:
-                        self.manager.tracked_anime.append(series_name)
-                        self.manager.save_tracked_anime(self.manager.tracked_anime)
-                        
-                    # Update UI
-                    QTimer.singleShot(0, self.update_tracked_list)
-                    QTimer.singleShot(0, self.refresh_card_statuses)
+                    self.manager.tracked_anime.append(series_name)
+                    self.manager.save_tracked_anime(self.manager.tracked_anime)
                     
-                    QMessageBox.information(self, "Success", 
-                        f"Started downloading: {title}\nTracking series: {series_name}")
+                    # Update UI safely
+                    try:
+                        self.update_tracked_list()
+                        self.refresh_card_statuses()
+                        QMessageBox.information(self, "Success", 
+                            f"Started downloading: {title}\nTracking series: {series_name}")
+                    except Exception as e:
+                        print(f"Error updating UI: {str(e)}")
                 else:
                     QMessageBox.warning(self, "Error", 
                         f"Failed to start download for: {title}")
@@ -1460,8 +1490,10 @@ class MainWindow(QMainWindow):
         for i in reversed(range(self.tracked_layout.count())):
             self.tracked_layout.itemAt(i).widget().setParent(None)
         
-        # Get unique series names
+        # Get unique series names from both tracked and downloaded
         series_set = set()
+        
+        # Add from tracked anime
         for anime in self.manager.tracked_anime:
             series_name = anime.replace("[SubsPlease]", "").strip().split(" - ")[0]
             series_set.add(series_name)
@@ -1473,14 +1505,19 @@ class MainWindow(QMainWindow):
                 series_name = file.replace("[SubsPlease]", "").strip().split(" - ")[0]
                 series_set.add(series_name)
         
-        # Calculate grid dimensions
-        available_width = self.tracked_layout.parent().width()
-        card_width = 250  # Minimum card width including margins
-        columns = max(1, available_width // card_width)
+        # Determine number of columns based on window width
+        window_width = self.width()
+        if window_width >= 1600:
+            columns = 7  # Large window
+        elif window_width >= 1200:
+            columns = 5  # Medium window
+        else:
+            columns = 3  # Small window
         
         # Create cards for each series
         for i, series in enumerate(sorted(series_set)):
             card = TrackedAnimeCard(series, self.manager)
+            card.setFixedSize(220, 380)  # Fixed size for entire card
             self.tracked_layout.addWidget(card, i // columns, i % columns)
             
     def update_downloads_list(self):
@@ -1491,14 +1528,19 @@ class MainWindow(QMainWindow):
         # Get .mkv files
         files = [f for f in self.manager.get_downloaded_files() if f.endswith('.mkv')]
         
-        # Calculate grid dimensions
-        available_width = self.downloads_layout.parent().width()
-        card_width = 250  # Minimum card width including margins
-        columns = max(1, available_width // card_width)
+        # Determine number of columns based on window width
+        window_width = self.width()
+        if window_width >= 1600:
+            columns = 7  # Large window
+        elif window_width >= 1200:
+            columns = 5  # Medium window
+        else:
+            columns = 3  # Small window
         
         # Create cards for each file
         for i, filename in enumerate(sorted(files)):
             card = DownloadCard(filename, self.manager)
+            card.setFixedSize(220, 380)  # Fixed size for entire card
             self.downloads_layout.addWidget(card, i // columns, i % columns)
         
     def browse_folder(self):
