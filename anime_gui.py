@@ -33,31 +33,15 @@ class FlippableCard(QFrame):
     def __init__(self):
         super().__init__()
         self.is_flipped = False
-        self.flip_animation = QPropertyAnimation(self, b"windowOpacity")
-        self.flip_animation.setDuration(300)  # 300ms for the flip
-        self.flip_animation.finished.connect(self._on_flip_finished)
         
     def flip_card(self):
-        self.flip_animation.setStartValue(1.0)
-        self.flip_animation.setEndValue(0.0)
-        self.flip_animation.start()
-        
-    def _on_flip_finished(self):
-        if self.flip_animation.direction() == QPropertyAnimation.Direction.Forward:
-            # Switch widgets
-            if self.is_flipped:
-                self.back_widget.hide()
-                self.front_widget.show()
-            else:
-                self.front_widget.hide()
-                self.back_widget.show()
-            self.is_flipped = not self.is_flipped
-            
-            # Fade back in
-            self.flip_animation.setDirection(QPropertyAnimation.Direction.Backward)
-            self.flip_animation.start()
+        if self.is_flipped:
+            self.back_widget.hide()
+            self.front_widget.show()
         else:
-            self.flip_animation.setDirection(QPropertyAnimation.Direction.Forward)
+            self.front_widget.hide()
+            self.back_widget.show()
+        self.is_flipped = not self.is_flipped
 
 class AnimeInfoLoader(QThread):
     info_loaded = pyqtSignal(str, str)
@@ -125,14 +109,15 @@ class AnimeCard(FlippableCard):
         self.layout.setContentsMargins(10, 10, 10, 10)
         self.layout.setSpacing(8)
         
-        # Create front and back widgets
+        # Create front and back widgets in the same layout
         self.front_widget = QWidget()
         self.back_widget = QWidget()
         self.setup_front()
         self.setup_back()
         
-        # Initially show front
+        # Add both to layout
         self.layout.addWidget(self.front_widget)
+        self.layout.addWidget(self.back_widget)
         self.back_widget.hide()
         
         # Load image
@@ -213,24 +198,27 @@ class AnimeCard(FlippableCard):
         self.info_loader = AnimeInfoLoader(self.title)
         self.info_loader.info_loaded.connect(self.update_description)
         
-        # Track button
-        track_btn = QPushButton("Track Series")
-        track_btn.setStyleSheet("""
+        # Track/Untrack button
+        clean_title = self.title.replace("[SubsPlease]", "").strip().split(" - ")[0]
+        is_tracked = any(clean_title in anime for anime in self.manager.tracked_anime)
+        
+        self.track_btn = QPushButton("Untrack Series" if is_tracked else "Track Series")
+        self.track_btn.setStyleSheet("""
             QPushButton {
-                background-color: #007AFF;
+                background-color: """ + ("#ff3b30" if is_tracked else "#007AFF") + """;
                 color: white;
                 border-radius: 5px;
                 padding: 8px;
                 font-size: 14px;
             }
             QPushButton:hover {
-                background-color: #0066CC;
+                background-color: """ + ("#ff453a" if is_tracked else "#0066CC") + """;
             }
         """)
-        track_btn.clicked.connect(lambda: self.clicked.emit(self.title))
+        self.track_btn.clicked.connect(lambda: self.clicked.emit(self.title))
         
         layout.addWidget(info_frame)
-        layout.addWidget(track_btn)
+        layout.addWidget(self.track_btn)
         
     def set_image(self, title, pixmap):
         if title == self.title.replace("[SubsPlease]", "").strip().split(" - ")[0]:
@@ -254,14 +242,31 @@ class AnimeCard(FlippableCard):
             
     def mousePressEvent(self, event):
         self.flip_card()
+        if not self.is_flipped:
+            # Start loading description when card is flipped to back
+            self.info_loader.start()
         
     def update_status(self):
         clean_title = self.title.replace("[SubsPlease]", "").strip().split(" - ")[0]
         is_tracked = any(clean_title in anime for anime in self.manager.tracked_anime)
-        self.status_label.setText("✓ Tracked" if is_tracked else "Click to View Info")
+        self.status_label.setText("✓ Tracking" if is_tracked else "Click to View Info")
         self.status_label.setStyleSheet(
             "color: #00b894; font-weight: bold;" if is_tracked else "color: #0984e3;"
         )
+        if hasattr(self, 'track_btn'):
+            self.track_btn.setText("Untrack Series" if is_tracked else "Track Series")
+            self.track_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: """ + ("#ff3b30" if is_tracked else "#007AFF") + """;
+                    color: white;
+                    border-radius: 5px;
+                    padding: 8px;
+                    font-size: 14px;
+                }
+                QPushButton:hover {
+                    background-color: """ + ("#ff453a" if is_tracked else "#0066CC") + """;
+                }
+            """)
         
     def update_description(self, title, description):
         if title == self.title:
@@ -385,14 +390,15 @@ class TrackedAnimeCard(FlippableCard):
         self.layout.setContentsMargins(10, 10, 10, 10)
         self.layout.setSpacing(8)
         
-        # Create front and back widgets
+        # Create front and back widgets in the same layout
         self.front_widget = QWidget()
         self.back_widget = QWidget()
         self.setup_front()
         self.setup_back()
         
-        # Initially show front
+        # Add both to layout
         self.layout.addWidget(self.front_widget)
+        self.layout.addWidget(self.back_widget)
         self.back_widget.hide()
         
         # Load image
@@ -640,14 +646,15 @@ class DownloadCard(FlippableCard):
         self.layout.setContentsMargins(10, 10, 10, 10)
         self.layout.setSpacing(8)
         
-        # Create front and back widgets
+        # Create front and back widgets in the same layout
         self.front_widget = QWidget()
         self.back_widget = QWidget()
         self.setup_front()
         self.setup_back()
         
-        # Initially show front
+        # Add both to layout
         self.layout.addWidget(self.front_widget)
+        self.layout.addWidget(self.back_widget)
         self.back_widget.hide()
         
         # Load image
@@ -841,13 +848,63 @@ class MainWindow(QMainWindow):
         self.resize_timer.setSingleShot(True)
         self.resize_timer.timeout.connect(self.handle_resize_timeout)
         
-        # Setup basic UI first so we have status labels
+        # Create central widget with layout
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        
+        # Setup UI components first
         self.setup_ui()
+        
+        # Add status bar for qBittorrent
+        status_bar = QWidget()
+        status_bar.setFixedHeight(30)
+        status_bar.setStyleSheet("background-color: white; border-top: 1px solid #e0e0e0;")
+        status_layout = QHBoxLayout(status_bar)
+        status_layout.setContentsMargins(20, 0, 20, 0)
+        
+        # Status indicator circle
+        self.status_circle = QLabel("●")
+        self.status_circle.setFixedWidth(20)
+        
+        # Status text
+        self.status_text = QLabel()
+        self.status_text.setStyleSheet("font-size: 12px;")
+        
+        # Reconnect button (hidden by default)
+        self.reconnect_btn = QPushButton("Reconnect")
+        self.reconnect_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #ff3b30;
+                color: white;
+                border-radius: 3px;
+                padding: 3px 8px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #ff453a;
+            }
+        """)
+        self.reconnect_btn.clicked.connect(self.ensure_qbittorrent_connection)
+        self.reconnect_btn.hide()
+        
+        status_layout.addStretch()
+        status_layout.addWidget(self.status_circle)
+        status_layout.addWidget(self.status_text)
+        status_layout.addWidget(self.reconnect_btn)
+        
+        main_layout.addWidget(status_bar)
         
         # Ensure qBittorrent connection before proceeding
         if not self.ensure_qbittorrent_connection():
             sys.exit(1)
             
+        # Update qBittorrent status
+        self.update_qbittorrent_status()
+        
+        # Setup timers
         self.setup_timers()
         
         # Handle Ctrl+C
@@ -865,19 +922,20 @@ class MainWindow(QMainWindow):
             return result == QDialog.DialogCode.Accepted
         return True
         
-    def check_qbittorrent_connection(self):
-        if not self.manager.qb_client or not self.manager.setup_qbittorrent():
-            self.qb_status_label.setText("qBittorrent: Disconnected ✗")
-            self.qb_status_label.setStyleSheet("color: red; font-weight: bold;")
+    def update_qbittorrent_status(self):
+        if self.manager.qb_client and self.manager.setup_qbittorrent():
+            self.status_circle.setStyleSheet("color: #00b894; font-weight: bold;")
+            self.status_text.setText("qBittorrent Connected")
+            self.status_text.setStyleSheet("color: #00b894;")
+            self.reconnect_btn.hide()
+        else:
+            self.status_circle.setStyleSheet("color: #ff3b30; font-weight: bold;")
+            self.status_text.setText("qBittorrent Disconnected")
+            self.status_text.setStyleSheet("color: #ff3b30;")
+            self.reconnect_btn.show()
             
-            # Show reconnection dialog
-            if self.ensure_qbittorrent_connection():
-                self.qb_status_label.setText("qBittorrent: Connected ✓")
-                self.qb_status_label.setStyleSheet("color: green; font-weight: bold;")
-            else:
-                QMessageBox.critical(self, "Connection Error", 
-                    "Failed to connect to qBittorrent. The application will now close.")
-                self.close()
+    def check_qbittorrent_connection(self):
+        self.update_qbittorrent_status()
         
     def setup_ui(self):
         main_widget = QWidget()

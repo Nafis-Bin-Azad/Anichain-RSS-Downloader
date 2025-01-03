@@ -150,8 +150,8 @@ class AnimeManager:
                 return False
             
             # Add torrent with category
-            self.qb_client.download_from_link(
-                link=link,
+            self.qb_client.torrents_add(
+                urls=[link],
                 category="Anime" if category else None
             )
             return True
