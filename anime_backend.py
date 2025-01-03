@@ -143,16 +143,20 @@ class AnimeManager:
             print(f"Failed to connect to qBittorrent: {e}")
             return False
 
-    def add_torrent(self, link):
-        if not self.qb_client and not self.setup_qbittorrent():
-            return False
-
+    def add_torrent(self, link, category=None):
+        """Add a torrent to qBittorrent with optional category."""
         try:
-            self.qb_client.torrents_add(urls=link)
-            print(f"Torrent added to qBittorrent: {link}")
+            if not self.qb_client:
+                return False
+            
+            # Add torrent with category
+            self.qb_client.download_from_link(
+                link=link,
+                category="Anime" if category else None
+            )
             return True
         except Exception as e:
-            print(f"Failed to add torrent: {e}")
+            print(f"Failed to add torrent: {str(e)}")
             return False
 
     def get_downloaded_files(self):
